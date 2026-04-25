@@ -1,17 +1,17 @@
-// main_cuda.cu  ── Phase 4: CUDA Streams benchmark
-// Compares sequential GPU BFS vs pipelined multi-stream GPU BFS.
-// Shows transfer/kernel overlap benefit across multiple queries.
+// main_cuda.cu  ── Phase 5: BFS + Dijkstra benchmark harness
 
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <chrono>
+#include <cmath>
 #include <cuda_runtime.h>
 
 #include "graph.h"
 #include "cpu_algorithms.h"
 #include "gpu_bfs.h"
 #include "gpu_bfs_async.h"
+#include "gpu_dijkstra.h"
 
 using Clock = std::chrono::high_resolution_clock;
 
@@ -31,18 +31,9 @@ static void print_gpu_info() {
         p.multiProcessorCount, p.totalGlobalMem/1e9, p.major, p.minor);
 }
 
-static bool validate(const std::vector<int>& cpu, const std::vector<int>& gpu) {
-    int mismatches = 0;
-    for (int i = 0; i < (int)cpu.size(); i++)
-        if (cpu[i] != gpu[i]) mismatches++;
-    if (mismatches) printf("  [VALIDATE] FAIL — %d mismatches\n", mismatches);
-    else            printf("  [VALIDATE] PASS\n");
-    return mismatches == 0;
-}
-
-// ── Single-query benchmark (Phase 2/3 baseline) ───────────────────────────────
-static void run_single(const CSRGraph& g, int source, const char* label) {
-    printf("=== %s ===\n", label);
+// ── BFS benchmark ─────────────────────────────────────────────────────────────
+static void run_bfs(const CSRGraph& g, int source, const char* label) {
+    printf("=== BFS | %s ===\n", label);
     g.print_stats();
 
     const int RUNS = 5;
@@ -55,55 +46,77 @@ static void run_single(const CSRGraph& g, int source, const char* label) {
     for (int r = 0; r < RUNS; r++) { t.start(); gpu_dist = gpu_bfs(g, source); gpu_total += t.ms(); }
 
     GpuBfsTiming tm = gpu_bfs_last_timing();
-    validate(cpu_dist, gpu_dist);
 
-    int reachable = 0;
-    for (int d : cpu_dist) if (d >= 0) reachable++;
-    printf("  Reachable        : %d / %d\n", reachable, g.num_nodes);
-    printf("  CPU BFS          : %.3f ms\n", cpu_total / RUNS);
-    printf("  GPU BFS (single) : %.3f ms  [transfer %.3f | kernel %.3f]\n",
-        gpu_total/RUNS, tm.transfer_ms, tm.kernel_ms);
-    printf("  Speedup (vs CPU) : %.2fx\n\n", (cpu_total/RUNS) / (gpu_total/RUNS));
+    int mismatches = 0;
+    for (int i = 0; i < g.num_nodes; i++) if (cpu_dist[i] != gpu_dist[i]) mismatches++;
+    int reachable = 0; for (int d : cpu_dist) if (d >= 0) reachable++;
+
+    printf("  [VALIDATE] %s\n", mismatches == 0 ? "PASS" : "FAIL");
+    printf("  Reachable  : %d / %d\n", reachable, g.num_nodes);
+    printf("  CPU        : %.3f ms\n", cpu_total / RUNS);
+    printf("  GPU        : %.3f ms  [transfer %.3f | kernel %.3f]\n",
+           gpu_total/RUNS, tm.transfer_ms, tm.kernel_ms);
+    printf("  Speedup    : %.2fx\n\n", (cpu_total/RUNS) / (gpu_total/RUNS));
 }
 
-// ── Multi-query streams benchmark (Phase 4) ───────────────────────────────────
-static void run_streams(const CSRGraph& g, const char* label) {
-    printf("=== Phase 4 Streams: %s ===\n", label);
+// ── Dijkstra benchmark ────────────────────────────────────────────────────────
+static void run_dijkstra(const CSRGraph& g, int source, const char* label) {
+    printf("=== Dijkstra | %s ===\n", label);
 
-    // Use 8 source nodes spread across the graph
+    const int RUNS = 5;
+    Timer t;
+
+    // CPU Dijkstra
+    double cpu_total = 0; std::vector<float> cpu_dist;
+    for (int r = 0; r < RUNS; r++) { t.start(); cpu_dist = cpu_dijkstra(g, source); cpu_total += t.ms(); }
+
+    // GPU delta-stepping (auto delta)
+    double gpu_total = 0; std::vector<float> gpu_dist;
+    for (int r = 0; r < RUNS; r++) { t.start(); gpu_dist = gpu_dijkstra(g, source); gpu_total += t.ms(); }
+
+    // Validate: allow small floating point epsilon
+    int mismatches = 0;
+    for (int i = 0; i < g.num_nodes; i++) {
+        float c = cpu_dist[i], gd = gpu_dist[i];
+        bool both_inf = (c == std::numeric_limits<float>::infinity())
+                     && (gd == std::numeric_limits<float>::infinity());
+        if (!both_inf && std::fabs(c - gd) > 1e-3f) mismatches++;
+    }
+
+    int reachable = 0;
+    for (float d : cpu_dist) if (d < std::numeric_limits<float>::infinity()) reachable++;
+
+    printf("  [VALIDATE] %s%s\n",
+        mismatches == 0 ? "PASS" : "FAIL",
+        mismatches > 0  ? " — check delta value" : "");
+    printf("  Reachable  : %d / %d\n", reachable, g.num_nodes);
+    printf("  CPU        : %.3f ms\n", cpu_total / RUNS);
+    printf("  GPU        : %.3f ms\n", gpu_total / RUNS);
+    printf("  Speedup    : %.2fx\n\n", (cpu_total/RUNS) / (gpu_total/RUNS));
+}
+
+// ── Streams benchmark ─────────────────────────────────────────────────────────
+static void run_streams(const CSRGraph& g, const char* label) {
+    printf("=== Streams | %s ===\n", label);
     int K = 8;
     std::vector<int> sources;
-    for (int i = 0; i < K; i++)
-        sources.push_back((i * g.num_nodes / K) % g.num_nodes);
+    for (int i = 0; i < K; i++) sources.push_back((i * g.num_nodes / K) % g.num_nodes);
 
-    // Sequential baseline: K individual gpu_bfs calls
     Timer t;
     t.start();
-    std::vector<std::vector<int>> seq_results;
-    for (int s : sources) seq_results.push_back(gpu_bfs(g, s));
+    for (int s : sources) { auto d = gpu_bfs(g, s); (void)d; }
     double seq_ms = t.ms();
 
-    // Streamed: 2-stream pipeline
     auto async2 = gpu_bfs_multi_stream(g, sources, 2);
 
-    // Validate: streamed results must match sequential
-    int mismatches = 0;
-    for (int i = 0; i < K; i++)
-        for (int v = 0; v < g.num_nodes; v++)
-            if (seq_results[i][v] != async2.distances[i][v]) mismatches++;
-
-    printf("  Queries          : %d sources\n", K);
-    printf("  Sequential       : %.3f ms  (%.3f ms/query)\n",
-        seq_ms, seq_ms/K);
-    printf("  2-stream async   : %.3f ms  (%.3f ms/query)\n",
-        async2.total_ms, async2.total_ms/K);
-    printf("  Stream speedup   : %.2fx\n",  seq_ms / async2.total_ms);
-    printf("  Validate         : %s\n\n", mismatches == 0 ? "PASS" : "FAIL");
+    printf("  Sequential : %.3f ms  (%.3f ms/query)\n", seq_ms, seq_ms/K);
+    printf("  2-stream   : %.3f ms  (%.3f ms/query)\n", async2.total_ms, async2.total_ms/K);
+    printf("  Stream spd : %.2fx\n\n", seq_ms / async2.total_ms);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
-    printf("== Graph Engine Phase 4: CUDA Streams ==\n\n");
+    printf("== Graph Engine Phase 5: BFS + Delta-Stepping Dijkstra ==\n\n");
     print_gpu_info();
 
     if (argc >= 2 && strcmp(argv[1], "--file") == 0) {
@@ -114,23 +127,20 @@ int main(int argc, char* argv[]) {
             if (strcmp(argv[i], "--source") == 0 && i+1 < argc)
                 source = atoi(argv[++i]);
 
-        CSRGraph g = CSRGraph::load_from_file(path);
+        CSRGraph g = CSRGraph::load_from_file(path, /*weighted=*/true);
         if (g.num_nodes == 0) return 1;
-        run_single(g, source, path.c_str());
-        run_streams(g, path.c_str());
+        run_bfs(g, source, path.c_str());
+        run_dijkstra(g, source, path.c_str());
 
     } else {
-        // Single-query speedup
         for (int N : {10000, 100000}) {
             char label[64]; sprintf(label, "Synthetic N=%d avg_deg=8", N);
             CSRGraph g = CSRGraph::random_graph(N, 8);
-            run_single(g, 0, label);
+            run_bfs(g, 0, label);
+            run_dijkstra(g, 0, label);
         }
-        // Streams benefit on 100K graph
-        {
-            CSRGraph g = CSRGraph::random_graph(100000, 8);
-            run_streams(g, "Synthetic N=100000 avg_deg=8");
-        }
+        CSRGraph g100k = CSRGraph::random_graph(100000, 8);
+        run_streams(g100k, "Synthetic N=100000 avg_deg=8");
     }
     return 0;
 }

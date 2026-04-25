@@ -25,17 +25,17 @@ add_executable(graph_engine
     src/cpu_algorithms.cpp
 )
 
-# ── Phase 2-4: CUDA ───────────────────────────────────────────────────────────
+# ── Phase 2-5: CUDA ───────────────────────────────────────────────────────────
 add_executable(graph_engine_cuda
     src/main_cuda.cu
     src/graph.cpp
     src/cpu_algorithms.cpp
     src/gpu_bfs.cu
     src/gpu_bfs_async.cu
+    src/gpu_dijkstra.cu
 )
 set_target_properties(graph_engine_cuda PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "CUDA arch:  sm_${CMAKE_CUDA_ARCHITECTURES}")
