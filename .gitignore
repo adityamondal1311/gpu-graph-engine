@@ -6,16 +6,15 @@ cmake_install.cmake
 *.vcxproj
 *.sln
 *.exe
-
 # CUDA / binaries
 *.o
 *.obj
 *.ptx
-
 # Data files
-*.txt
 *.gz
-
+ca-*.txt
+com-*.txt
+roadNet-*.txt
 # Python
 __pycache__/
 *.pyc
