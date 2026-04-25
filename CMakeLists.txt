@@ -38,4 +38,14 @@ set_target_properties(graph_engine_cuda PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
+# ── Phase 6: Block size tuning binary ────────────────────────────────────────
+add_executable(graph_engine_tune
+    src/benchmark_blocksize.cu
+    src/graph.cpp
+    src/cpu_algorithms.cpp
+)
+set_target_properties(graph_engine_tune PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "CUDA arch:  sm_${CMAKE_CUDA_ARCHITECTURES}")
